@@ -1,0 +1,52 @@
+name: Recover PDF batch 0
+
+on:
+  push:
+    paths:
+      - ".github/workflows/recover-pdf-batch0.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+          fetch-depth: 1
+
+      - name: Pull first 10 PDFs one by one
+        shell: bash
+        run: |
+          set -u
+          mapfile -t PDFS < <(git ls-files '*.pdf' | sort | head -n 10)
+          mkdir -p artifact
+          : > failed.txt
+          git lfs install
+          for FILE in "${PDFS[@]}"; do
+            echo "=== $FILE ==="
+            git checkout -- "$FILE"
+            if git lfs pull --include="$FILE" --exclude="" && head -c 5 "$FILE" | grep -q '%PDF'; then
+              cp -- "$FILE" artifact/
+              echo "OK: $FILE"
+            else
+              echo "$FILE" | tee -a failed.txt
+              echo "FAILED: $FILE"
+            fi
+          done
+          cp failed.txt artifact/
+          printf '%s\n' "${PDFS[@]}" > artifact/expected_manifest.txt
+          echo "---- Failed files ----"
+          cat failed.txt
+
+      - name: Upload recovered batch 0
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-batch-0-recovered
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
