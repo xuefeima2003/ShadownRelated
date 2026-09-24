@@ -1,4 +1,4 @@
-name: Test LFS PDF handoff
+name: Export all LFS PDFs in batches
 
 on:
   push:
@@ -7,14 +7,18 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: lfs-pdf-handoff-test
+  group: export-lfs-pdf-batches
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  export-one-pdf:
+  export-pdfs:
+    strategy:
+      fail-fast: false
+      matrix:
+        batch: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository without LFS smudge
@@ -23,33 +27,39 @@ jobs:
           lfs: false
           fetch-depth: 1
 
-      - name: Pull only target LFS PDF
+      - name: Select and pull this batch only
         shell: bash
         run: |
           set -euo pipefail
-          FILE="A Bayesian Approach for Shadow Extraction from a Single Image.pdf"
+          mapfile -t PDFS < <(git ls-files '*.pdf' | sort)
+          START=$(( ${{ matrix.batch }} * 10 ))
+          END=$(( START + 10 ))
+          mkdir -p artifact
+          SELECTED=()
+          for ((i=START; i<END && i<${#PDFS[@]}; i++)); do
+            SELECTED+=("${PDFS[$i]}")
+          done
+          if [ "${#SELECTED[@]}" -eq 0 ]; then
+            echo "No PDFs in this batch"
+            exit 1
+          fi
+          printf '%s\n' "${SELECTED[@]}" > artifact_manifest.txt
+          INCLUDE=$(IFS=, ; echo "${SELECTED[*]}")
           git lfs install
-          git lfs pull --include="$FILE" --exclude=""
-          test -f "$FILE"
+          git lfs pull --include="$INCLUDE" --exclude=""
+          while IFS= read -r FILE; do
+            test -f "$FILE"
+            head -c 5 "$FILE" | grep -q '%PDF'
+            cp -- "$FILE" artifact/
+          done < artifact_manifest.txt
+          cp artifact_manifest.txt artifact/
+          echo "Selected ${#SELECTED[@]} PDFs"
 
-      - name: Verify target PDF
-        shell: bash
-        run: |
-          set -euo pipefail
-          FILE="A Bayesian Approach for Shadow Extraction from a Single Image.pdf"
-          echo "File size:"
-          stat -c '%s bytes' "$FILE"
-          echo "Magic bytes:"
-          head -c 5 "$FILE" | xxd
-          head -c 5 "$FILE" | grep -q '%PDF'
-          echo "SHA256:"
-          sha256sum "$FILE"
-
-      - name: Upload original PDF as artifact
+      - name: Upload PDF batch
         uses: actions/upload-artifact@v4
         with:
-          name: lfs-pdf-test
-          path: "A Bayesian Approach for Shadow Extraction from a Single Image.pdf"
+          name: pdf-batch-${{ matrix.batch }}
+          path: artifact/
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
