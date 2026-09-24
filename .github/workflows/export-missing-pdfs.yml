@@ -1,0 +1,65 @@
+name: Export remaining special-name PDFs
+
+on:
+  push:
+    paths:
+      - ".github/workflows/export-missing-pdfs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+          fetch-depth: 1
+
+      - name: Pull explicit missing PDFs
+        shell: bash
+        run: |
+          set -u
+          mkdir -p artifact
+          : > failed.txt
+          git lfs install
+
+          pull_one() {
+            FILE="$1"
+            echo "=== $FILE ==="
+            if git lfs pull --include="$FILE" --exclude="" && head -c 5 "$FILE" | grep -q '%PDF'; then
+              cp -- "$FILE" artifact/
+              echo "OK: $FILE"
+            else
+              echo "$FILE" | tee -a failed.txt
+              echo "FAILED: $FILE"
+            fi
+          }
+
+          pull_one "A Bayesian Approach for Shadow Extraction from a Single Image.pdf"
+          pull_one "A Bayesian Approach to Digital Matting.pdf"
+          pull_one "An Improved Physically‐Based Soft Shadow Volume Algorithm.pdf"
+          pull_one "Fast Shadow Removal Using Adaptive Multi‐Scale Illumination Transfer.pdf"
+          pull_one "NEXT GENERATION MODTRAN® FOR IMPROVED AC OF SPECTRAL IMAGERY.pdf"
+          pull_one "The CIEDE2000 color‐difference formula  Implementation notes  supplementary.pdf"
+          pull_one "Image Matting代码和算法效果总结.pdf"
+          pull_one "图像处理基础（十二）贝叶斯抠图，bayers matting.pdf"
+          pull_one "贝叶斯估计、最大似然估计、最大后验概率与Baysian Matting.pdf"
+          pull_one "Book - Scattering, Absorption, and Emission of Light by Small Particles by Mishchenko et al(1).pdf"
+          pull_one "Book - Scattering, Absorption, and Emission of Light by Small Particles by Mishchenko et al.pdf"
+          pull_one "The Shadow Meets the Mask - Pyramid‐Based Shadow Removal.pdf"
+
+          cp failed.txt artifact/
+          echo "---- Failed files ----"
+          cat failed.txt
+
+      - name: Upload remaining PDFs
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-missing-special
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
