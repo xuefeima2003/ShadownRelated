@@ -1,0 +1,60 @@
+name: Recover PDF batches 0 and 3
+
+on:
+  push:
+    paths:
+      - ".github/workflows/recover-pdf-batches.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    strategy:
+      fail-fast: false
+      matrix:
+        batch: [0, 3]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+          fetch-depth: 1
+
+      - name: Pull PDFs one by one
+        shell: bash
+        run: |
+          set -u
+          mapfile -t PDFS < <(git ls-files '*.pdf' | sort)
+          START=$(( ${{ matrix.batch }} * 10 ))
+          END=$(( START + 10 ))
+          mkdir -p artifact
+          : > failed.txt
+          : > expected_manifest.txt
+          git lfs install
+          for ((i=START; i<END && i<${#PDFS[@]}; i++)); do
+            FILE="${PDFS[$i]}"
+            echo "$FILE" >> expected_manifest.txt
+            echo "=== $FILE ==="
+            git checkout -- "$FILE"
+            if git lfs pull --include="$FILE" --exclude="" && head -c 5 "$FILE" | grep -q '%PDF'; then
+              cp -- "$FILE" artifact/
+              echo "OK: $FILE"
+            else
+              echo "$FILE" | tee -a failed.txt
+              echo "FAILED: $FILE"
+            fi
+          done
+          cp failed.txt expected_manifest.txt artifact/
+          echo "---- Failed files ----"
+          cat failed.txt
+
+      - name: Upload recovered batch
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-batch-${{ matrix.batch }}-recovered
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
