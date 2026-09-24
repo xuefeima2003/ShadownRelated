@@ -1,0 +1,43 @@
+name: Test LFS PDF handoff
+
+on:
+  push:
+    paths:
+      - ".github/workflows/read-lfs-pdf.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export-one-pdf:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository with Git LFS
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          fetch-depth: 1
+
+      - name: Verify target PDF
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE="A Bayesian Approach for Shadow Extraction from a Single Image.pdf"
+          test -f "$FILE"
+          echo "File size:"
+          stat -c '%s bytes' "$FILE"
+          echo "Magic bytes:"
+          head -c 5 "$FILE" | xxd
+          head -c 5 "$FILE" | grep -q '%PDF'
+          echo "SHA256:"
+          sha256sum "$FILE"
+
+      - name: Upload original PDF as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lfs-pdf-test
+          path: "A Bayesian Approach for Shadow Extraction from a Single Image.pdf"
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
