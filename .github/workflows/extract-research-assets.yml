@@ -1,0 +1,219 @@
+name: Extract research assets for review
+
+on:
+  push:
+    paths:
+      - ".github/workflows/extract-research-assets.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+          fetch-depth: 1
+
+      - name: Install parsers
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install python-pptx pillow
+
+      - name: Extract PPTX, image metadata, and repository inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact/pptx artifact/images artifact/inventory
+
+          find . -maxdepth 2 -type f -printf '%P\t%s bytes\n' | sort > artifact/inventory/all_files.tsv
+
+          python - <<'PY'
+          from pathlib import Path
+          from pptx import Presentation
+          from PIL import Image, ExifTags
+          import zipfile, shutil, json, csv, re, os
+          import xml.etree.ElementTree as ET
+
+          root = Path(".")
+          out = Path("artifact")
+          ns_a = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+
+          # Image inventory + copy all repository raster images.
+          img_rows = []
+          for p in sorted(root.iterdir()):
+              if p.suffix.lower() not in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}:
+                  continue
+              dest = out / "images" / p.name
+              shutil.copy2(p, dest)
+              row = {"file": p.name, "bytes": p.stat().st_size}
+              try:
+                  with Image.open(p) as im:
+                      row.update({
+                          "format": im.format,
+                          "mode": im.mode,
+                          "width": im.width,
+                          "height": im.height,
+                          "bands": ",".join(im.getbands()),
+                      })
+                      exif = {}
+                      try:
+                          raw = im.getexif()
+                          for k, v in raw.items():
+                              exif[ExifTags.TAGS.get(k, str(k))] = str(v)
+                      except Exception:
+                          pass
+                      row["exif"] = json.dumps(exif, ensure_ascii=False)
+              except Exception as e:
+                  row["error"] = repr(e)
+              img_rows.append(row)
+
+          fields = sorted({k for r in img_rows for k in r})
+          with open(out / "inventory" / "image_metadata.csv", "w", newline="", encoding="utf-8-sig") as f:
+              w = csv.DictWriter(f, fieldnames=fields)
+              w.writeheader()
+              w.writerows(img_rows)
+
+          # Parse all PPTX files.
+          for pptx in sorted(root.glob("*.pptx")):
+              safe = re.sub(r"[^0-9A-Za-z._-]+", "_", pptx.stem).strip("_") or "deck"
+              pdir = out / "pptx" / safe
+              pdir.mkdir(parents=True, exist_ok=True)
+              media_dir = pdir / "media"
+              media_dir.mkdir(exist_ok=True)
+
+              md = [f"# {pptx.name}", ""]
+              try:
+                  prs = Presentation(str(pptx))
+                  md += [f"- Slides: {len(prs.slides)}", ""]
+
+                  for i, slide in enumerate(prs.slides, 1):
+                      md += [f"## Slide {i}", ""]
+                      texts = []
+                      for shape in slide.shapes:
+                          if getattr(shape, "has_text_frame", False):
+                              t = "\n".join(
+                                  para.text for para in shape.text_frame.paragraphs
+                                  if para.text is not None
+                              ).strip()
+                              if t:
+                                  texts.append(t)
+                          if getattr(shape, "has_table", False):
+                              table = shape.table
+                              md.append("### Table")
+                              for row in table.rows:
+                                  md.append("| " + " | ".join(c.text.replace("\n", " ") for c in row.cells) + " |")
+                              md.append("")
+                      if texts:
+                          md.extend(texts)
+                          md.append("")
+                      else:
+                          md += ["*(no text objects extracted)*", ""]
+
+                      try:
+                          notes = slide.notes_slide
+                          note_texts = []
+                          for shape in notes.shapes:
+                              if getattr(shape, "has_text_frame", False):
+                                  t = "\n".join(p.text for p in shape.text_frame.paragraphs).strip()
+                                  if t and t not in note_texts:
+                                      note_texts.append(t)
+                          if note_texts:
+                              md += ["### Notes", "\n\n".join(note_texts), ""]
+                      except Exception:
+                          pass
+
+                  (pdir / "slides_text.md").write_text("\n".join(md), encoding="utf-8")
+
+              except Exception as e:
+                  (pdir / "pptx_parse_error.txt").write_text(repr(e), encoding="utf-8")
+
+              # OOXML extraction: slide XML text, relationships and embedded media.
+              try:
+                  with zipfile.ZipFile(pptx, "r") as z:
+                      names = z.namelist()
+                      (pdir / "zip_manifest.txt").write_text("\n".join(names), encoding="utf-8")
+                      xml_dir = pdir / "slide_xml"
+                      rel_dir = pdir / "slide_rels"
+                      xml_dir.mkdir(exist_ok=True)
+                      rel_dir.mkdir(exist_ok=True)
+
+                      for name in names:
+                          if name.startswith("ppt/media/") and not name.endswith("/"):
+                              target = media_dir / Path(name).name
+                              target.write_bytes(z.read(name))
+                          elif re.fullmatch(r"ppt/slides/slide\d+\.xml", name):
+                              data = z.read(name)
+                              (xml_dir / Path(name).name).write_bytes(data)
+                              try:
+                                  r = ET.fromstring(data)
+                                  texts = [el.text for el in r.findall(".//a:t", ns_a) if el.text]
+                                  (xml_dir / (Path(name).stem + "_text.txt")).write_text(
+                                      "\n".join(texts), encoding="utf-8"
+                                  )
+                              except Exception:
+                                  pass
+                          elif re.fullmatch(r"ppt/slides/_rels/slide\d+\.xml\.rels", name):
+                              (rel_dir / Path(name).name).write_bytes(z.read(name))
+              except Exception as e:
+                  (pdir / "zip_parse_error.txt").write_text(repr(e), encoding="utf-8")
+
+          # ZIP manifests so we know whether bundled archives contain research data.
+          zip_report = []
+          for zp in sorted(root.glob("*.zip")):
+              zip_report.append(f"# {zp.name}")
+              try:
+                  with zipfile.ZipFile(zp, "r") as z:
+                      for info in z.infolist():
+                          zip_report.append(f"{info.filename}\t{info.file_size}")
+              except Exception as e:
+                  zip_report.append(f"ERROR\t{e!r}")
+              zip_report.append("")
+          (out / "inventory" / "zip_manifests.txt").write_text("\n".join(zip_report), encoding="utf-8")
+
+          # Search code/text files for data-source clues.
+          clues = [
+              "DSM", "DEM", "DOM", "NIR", "near infrared", "multispectral",
+              "MicaSense", "RedEdge", "Altum", "Mavic", "DMC", "RAW", "DNG",
+              "radiometric", "calibration", "camera", "GPS", "GNSS", "IMU",
+              "shadow", "sun", "Wuhan", "武汉"
+          ]
+          text_ext = {".py",".m",".c",".cpp",".h",".rtf",".yml",".yaml",".md",".txt"}
+          rows = []
+          for p in sorted(root.rglob("*")):
+              if not p.is_file() or p.suffix.lower() not in text_ext or ".git" in p.parts:
+                  continue
+              try:
+                  txt = p.read_text(encoding="utf-8", errors="ignore")
+              except Exception:
+                  continue
+              for lineno, line in enumerate(txt.splitlines(), 1):
+                  if any(k.lower() in line.lower() for k in clues):
+                      rows.append(f"{p.as_posix()}:{lineno}: {line[:500]}")
+          (out / "inventory" / "keyword_hits.txt").write_text("\n".join(rows), encoding="utf-8")
+          PY
+
+      - name: Best-effort render PowerPoint to PDF
+        shell: bash
+        run: |
+          set +e
+          if command -v libreoffice >/dev/null 2>&1; then
+            mkdir -p artifact/rendered
+            for f in *.pptx; do
+              [ -e "$f" ] || continue
+              libreoffice --headless --convert-to pdf --outdir artifact/rendered "$f"
+            done
+          fi
+
+      - name: Upload extracted research assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: research-assets-review
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 0
